@@ -10,27 +10,40 @@ import {
   privateProcedure,
   publicProcedure,
 } from "~/server/api/trpc";
+import { filterUserForClient } from "~/server/helpers/filterUserForClient";
 
-const addUsersDataToPosts = async (posts: Post[]) => {
-  const users = await clerkClient.users.getUserList({
-    userId: posts.map((post) => post.authorId),
-    limit: 100,
-  });
+const addUserDataToPosts = async (posts: Post[]) => {
+  const userId = posts.map((post) => post.authorId);
+  const users = (
+    await clerkClient.users.getUserList({
+      userId: userId,
+      limit: 110,
+    })
+  ).map(filterUserForClient);
 
   return posts.map((post) => {
     const author = users.find((user) => user.id === post.authorId);
 
-    if (!author || !author.username)
+    if (!author)
       throw new TRPCError({
         code: "INTERNAL_SERVER_ERROR",
         message: "Author for post not found",
       });
-
+    if (!author.userName) {
+      // user the ExternalUsername
+      if (!author.externalUsername) {
+        throw new TRPCError({
+          code: "INTERNAL_SERVER_ERROR",
+          message: `Author has no GitHub Account: ${author.id}`,
+        });
+      }
+      author.userName = author.externalUsername;
+    }
     return {
       post,
       author: {
         ...author,
-        username: author.username,
+        username: author.userName ?? "(username not found)",
       },
     };
   });
@@ -43,13 +56,24 @@ const ratelimit = new Ratelimit({
 });
 
 export const postsRouter = createTRPCRouter({
+  getById: publicProcedure
+    .input(z.object({ id: z.string() }))
+    .query(async ({ ctx, input }) => {
+      const post = await ctx.prisma.post.findUnique({
+        where: { id: input.id },
+      });
+
+      if (!post) throw new TRPCError({ code: "NOT_FOUND" });
+      return (await addUserDataToPosts([post]))[0];
+    }),
+
   getAll: publicProcedure.query(async ({ ctx }) => {
     const posts = await ctx.prisma.post.findMany({
       take: 100,
       orderBy: [{ createdAt: "desc" }],
     });
 
-    return addUsersDataToPosts(posts);
+    return addUserDataToPosts(posts);
   }),
 
   getPostsByUserId: publicProcedure
@@ -67,7 +91,7 @@ export const postsRouter = createTRPCRouter({
           take: 100,
           orderBy: [{ createdAt: "desc" }],
         })
-        .then(addUsersDataToPosts)
+        .then(addUserDataToPosts)
     ),
 
   create: privateProcedure
